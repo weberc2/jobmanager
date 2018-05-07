@@ -15,60 +15,12 @@ import (
 
 	"github.com/gregdel/pushover"
 	"github.com/kr/pretty"
-
 	"github.com/lib/pq"
+
+	. "github.com/weberc2/jobmanager/jobmanager"
 )
 
-func jsonLog(message string, details interface{}) {
-	input := struct {
-		Message   string      `json:"message"`
-		Details   interface{} `json:"details"`
-		Timestamp time.Time   `json:"timestamp"`
-	}{message, details, time.Now().UTC()}
-	data, err := json.MarshalIndent(input, "", "    ")
-	if err != nil {
-		jsonLog("log_serialize_error", pretty.Sprint(input))
-		return
-	}
-	log.Println(string(data))
-}
-
-type JobID string
-
-type Job struct {
-	Name            string
-	ID              JobID
-	PushoverUserKey string
-	Command         string
-	CommandArgs     []string
-	Timeout         time.Duration
-	Schedule        time.Duration
-}
-
-type RunStatus string
-
-const (
-	RunStatusPreparing RunStatus = "RUN_STATUS_PREPARING"
-	RunStatusPending   RunStatus = "RUN_STATUS_PENDING"
-	RunStatusSuccess   RunStatus = "RUN_STATUS_SUCCESS"
-	RunStatusError     RunStatus = "RUN_STATUS_ERROR"
-)
-
-type Run struct {
-	JobID    JobID
-	Number   int
-	Status   RunStatus
-	Started  time.Time
-	Duration time.Duration
-	Stderr   string
-	Stdout   string
-	Err      string
-	PID      int
-}
-
-func (r Run) Running() bool {
-	return r.Status == RunStatusPending || r.Status == RunStatusPreparing
-}
+var pushoverAPIKey = os.Getenv("PUSHOVER_API_KEY")
 
 type ScheduleStore interface {
 	// Overdue returns all of the jobs which are not running and which last
@@ -262,7 +214,7 @@ func (rt Runtime) Run() error {
 				summary,
 				err.Error(),
 			); err2 != nil {
-				jsonLog("notify_user_error", map[string]interface{}{
+				JSONLog("notify_user_error", map[string]interface{}{
 					"message":              "Failed to notify user",
 					"pushover_user_key":    j.PushoverUserKey,
 					"notification_summary": summary,
@@ -302,7 +254,7 @@ func (s Scheduler) Run(cb func(Job)) error {
 		if err != nil {
 			return err
 		}
-		jsonLog("overdue_jobs", jobs)
+		JSONLog("overdue_jobs", jobs)
 		for _, job := range jobs {
 			go cb(job)
 		}
@@ -319,7 +271,7 @@ type Dispatcher struct {
 }
 
 func (d Dispatcher) Dispatch(j Job) (Run, error) {
-	jsonLog("running_job", j)
+	JSONLog("running_job", j)
 	stdout := bytes.NewBuffer(nil)
 	stderr := bytes.NewBuffer(nil)
 
@@ -336,7 +288,7 @@ func (d Dispatcher) Dispatch(j Job) (Run, error) {
 	// start the command
 	cmd, err := d.Start(stdout, stderr, j.Command, j.CommandArgs...)
 	if err != nil {
-		jsonLog("start_run_error", err.Error())
+		JSONLog("start_run_error", err.Error())
 		run, err2 := d.Runs.Update(Run{
 			JobID:    j.ID,
 			Number:   run.Number,
@@ -346,7 +298,7 @@ func (d Dispatcher) Dispatch(j Job) (Run, error) {
 			Err:      err.Error(),
 		})
 		if err2 != nil {
-			jsonLog("update_run_error", map[string]interface{}{
+			JSONLog("update_run_error", map[string]interface{}{
 				"message":    "Failed to update run status to RUN_STATUS_ERROR",
 				"details":    err2.Error(),
 				"run_job_id": j.ID,
@@ -375,7 +327,7 @@ func (d Dispatcher) Dispatch(j Job) (Run, error) {
 				"details": err.Error(),
 			}
 		}
-		jsonLog("update_run_error", map[string]interface{}{
+		JSONLog("update_run_error", map[string]interface{}{
 			"message":     "Failed to update run status to RUN_STATUS_PENDING",
 			"details":     err.Error(),
 			"run_job_id":  j.ID,
@@ -447,7 +399,7 @@ func (pn PushoverNotifier) Notify(
 	if err != nil {
 		return err
 	}
-	jsonLog("notify_user_succeeded", map[string]interface{}{
+	JSONLog("notify_user_succeeded", map[string]interface{}{
 		"message":               "Successfully notified user",
 		"pushover_user_key":     userKey,
 		"notification_summary":  summary,
@@ -458,35 +410,20 @@ func (pn PushoverNotifier) Notify(
 }
 
 func main() {
-	pushoverAPIKey := os.Getenv("PUSHOVER_API_KEY")
-	if pushoverAPIKey == "" {
-		jsonLog(
-			"pushover_api_key_unset",
-			"PUSHOVER_API_KEY env var is not set",
-		)
-		log.Fatal()
-	}
-
-	jsonLog("app_starting", nil)
-	db, err := sql.Open(
-		"postgres",
-		"postgresql://localhost:5432/jobmanager?sslmode=disable",
-	)
+	db, err := OpenDatabase()
 	if err != nil {
-		jsonLog("db_open_error", err.Error())
-		log.Fatal()
+		JSONLog("db_open_error", err.Error())
+		log.Fatal(err)
 	}
 	defer db.Close()
 
-	jsonLog("db_open_succeeded", nil)
+	JSONLog("db_open_succeeded", "")
 
-	// var runs MemoryRunStore
 	runtime := Runtime{
 		Dispatcher: Dispatcher{
 			TimeNow: func() time.Time { return time.Now().UTC() },
-			// Runs:    &runs,
-			Runs:  PostgresRunStore{db},
-			Start: NativeStart,
+			Runs:    PostgresRunStore{db},
+			Start:   NativeStart,
 		},
 		Scheduler: Scheduler{
 			PollingFrequency: 30 * time.Second,
@@ -495,8 +432,5 @@ func main() {
 		Notify: PushoverNotifier{App: pushover.New(pushoverAPIKey)}.Notify,
 	}
 
-	if err := runtime.Run(); err != nil {
-		jsonLog("runtime_error", err.Error())
-		log.Fatal()
-	}
+	JSONLog("scheduler_error", runtime.Run().Error())
 }
